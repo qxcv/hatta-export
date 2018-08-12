@@ -49,10 +49,11 @@ def mkdir_p(dir_path):
 
 
 class CustomRenderComponents:
-    def __init__(self, converter, page_name):
+    def __init__(self, converter, page_name, strip_html_link_ext):
         self.converter = converter
         self.wiki = converter.wiki
         self.page_name = page_name
+        self.strip_html_link_ext = strip_html_link_ext
 
         # for _link_alias
         if self.wiki.alias_page and self.wiki.alias_page in self.wiki.storage:
@@ -63,9 +64,11 @@ class CustomRenderComponents:
 
     def get_ref_path(self, other_title):
         # now need to get file paths & relative path between those two
-        this_subpath = self.converter.out_subpath(self.page_name)
+        this_subpath = self.converter.out_subpath(
+            self.page_name, omit_html_ext=self.strip_html_link_ext)
         this_dir = os.path.dirname(this_subpath)
-        other_subpath = self.converter.out_subpath(other_title)
+        other_subpath = self.converter.out_subpath(
+            other_title, omit_html_ext=self.strip_html_link_ext)
         relpath = os.path.relpath(other_subpath, start=this_dir)
         return relpath
 
@@ -175,24 +178,25 @@ def scrub_html(html_string):
 
 
 class WikiConverter:
-    def __init__(self, wiki, file_prefix=None):
+    def __init__(self, wiki, file_prefix=None, strip_html_link_ext=False):
         self.wiki = wiki
         self.file_prefix = file_prefix
+        self.strip_html_link_ext = strip_html_link_ext
 
     def is_raw(self, title):
         return page_mime(title) != 'text/x-wiki'
 
-    def out_subpath(self, title):
+    def out_subpath(self, title, omit_html_ext=False):
         subpath = name_to_file(title)
         if self.file_prefix is not None and self.is_raw(title):
             subpath = os.path.join(self.file_prefix, subpath)
-        if not self.is_raw(title):
+        if not self.is_raw(title) and not omit_html_ext:
             subpath += '.html'
         return subpath
 
     def render(self, title):
         lines = self.wiki.storage.page_text(title).splitlines(True)
-        comp = CustomRenderComponents(self, title)
+        comp = CustomRenderComponents(self, title, self.strip_html_link_ext)
         # WikiWikiParser (which autolinks WikiWords) is unsupported for now,
         # but should be easy to add if ever needed
         parser = hatta.WikiParser(
@@ -210,7 +214,7 @@ class WikiConverter:
         inner_html = ''.join(parser_output)
         html_template = """\
 <!DOCTYPE html>
-<html>
+<html lang="en">
     <head>
         <meta charset="utf-8" />
         <title>%s</title>
@@ -222,8 +226,13 @@ class WikiConverter:
         return clean_html
 
 
-def convert_page(page_name, wiki, out_dir, file_prefix=None):
-    converter = WikiConverter(wiki, file_prefix=file_prefix)
+def convert_page(page_name,
+                 wiki,
+                 out_dir,
+                 file_prefix=None,
+                 strip_html_link_ext=False):
+    converter = WikiConverter(
+        wiki, file_prefix=file_prefix, strip_html_link_ext=strip_html_link_ext)
 
     # find & construct destination dir
     out_subpath = converter.out_subpath(page_name)
@@ -263,7 +272,8 @@ def main(args):
             page_name,
             wiki=wiki,
             out_dir=args.output_dir,
-            file_prefix=args.file_prefix)
+            file_prefix=args.file_prefix,
+            strip_html_link_ext=args.strip_html_link_ext)
     print('Done!')
 
 
@@ -284,6 +294,8 @@ parser.add_argument(
     default=None,
     help="move files (anything that\'s not a wiki page) into this "
     "subdirectory of output_dir")
+parser.add_argument(
+    '--strip-html-link-ext', action='store_true', default='false')
 
 if __name__ == '__main__':
     main(parser.parse_args())

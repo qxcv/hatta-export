@@ -15,7 +15,10 @@ fi
 hatta_config="$1"
 
 echo "Reading from $hatta_config. Will write to $OUTPUT_DIR."
-./convert.py --file-prefix "$FILE_PREFIX" "$hatta_config" "$OUTPUT_DIR"
+./convert.py \
+    --strip-html-link-ext \
+    --file-prefix "$FILE_PREFIX" \
+    "$hatta_config" "$OUTPUT_DIR"
 find "$OUTPUT_DIR" -type f -name '*.html' -not -path "$OUTPUT_PREFIX/$FILE_PREFIX" \
 | while read html_path; do
     page_path="$(echo "$html_path" | sed -e 's/\.html$/.page/')"
