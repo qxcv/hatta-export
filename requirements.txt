@@ -1,3 +1,4 @@
 hatta==1.6.7
 # hg 4.7 seems broken with 1.6.7 due to API change; this forces downgrade
 mercurial==4.4.2
+beautifulsoup4==4.6.3

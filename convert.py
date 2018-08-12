@@ -11,6 +11,7 @@ import os
 import textwrap
 import urllib
 
+import bs4
 import hatta
 import werkzeug
 from werkzeug import html
@@ -156,6 +157,23 @@ class CustomRenderComponents:
         return werkzeug.escape(u'$%s$' % math_text)
 
 
+def scrub_html(html_string):
+    """Strip unneeded attributes inserted by Hatta from some HTML source (e.g.
+    classes, reference anchors with generic IDs, etc.)."""
+    soup = bs4.BeautifulSoup(html_string, features="html.parser")
+    # delete all classes
+    for elem in soup.select("[class]"):
+        del elem['class']
+    # delete generic IDs (if the form line_32 etc.)
+    for elem in soup.select("[id^='line_']"):
+        del elem['id']
+    # delete all <a name="head-*" /> anchors
+    for elem in soup.select("a[name^='head-']"):
+        if len(list(elem.children)) == 0:
+            elem.decompose()
+    return unicode(soup)
+
+
 class WikiConverter:
     def __init__(self, wiki, file_prefix=None):
         self.wiki = wiki
@@ -200,7 +218,8 @@ class WikiConverter:
     <body>%s</body>
 </html>"""
         outer_html = html_template % (title, inner_html)
-        return outer_html
+        clean_html = scrub_html(outer_html)
+        return clean_html
 
 
 def convert_page(page_name, wiki, out_dir, file_prefix=None):
