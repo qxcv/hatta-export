@@ -1,3 +1,0 @@
-# Hatta wiki exporter
-
-
