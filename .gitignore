@@ -1,4 +1,7 @@
 *.pyc
 *.swp
 #.*
-out/
+
+# some output dirs
+/out/
+/hatta/
