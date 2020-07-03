@@ -8,6 +8,7 @@ gitit or other wikis."""
 import argparse
 import errno
 import os
+import re
 import textwrap
 import urllib
 
@@ -16,6 +17,127 @@ import hatta
 import werkzeug
 from werkzeug import html
 from hatta.page import page_mime
+
+
+ANU_COURSE_RE = '(COMP|ENGN|MATH|STAT)\d{4}'
+
+
+def rewrite_basic_prefixes(wiki, title):
+    """Rewrite titles of a subset of pages that happen to follow very uniform
+    structure."""
+    if '/' in title:
+        return title
+
+    dir_prefix_patterns = [
+        r'^' + ANU_COURSE_RE,
+        r'^HMU',
+        r'^IJCAI17',
+        r'^AAAI',
+    ]
+    for pat in dir_prefix_patterns:
+        match = re.match(pat, title)
+        if not match:
+            continue
+        first, rest = title[:match.end()], title[match.end():]
+        rest = rest.strip()
+        if rest:
+            return first + '/' + rest
+    return title
+
+
+def rewrite_via_backlinks(wiki, title):
+    """Use backlink heuristic to place pages in the right directory.
+
+    Specifically, this looks at all the backlinks of a page. If a page is _not_
+    already in a directory, _not_ linked from "Home", and linked from a page
+    whose name is a prefix of all other backlinks, then we put the page in the
+    appropriate directory. For example, "Search (AI)" might be backlinked from
+    "COMP3620" and "COMP3620Revision". Thus we put it in "COMP3620/Search (AI)"
+    instead. Hopefully this heuristic will work for other things, too.
+
+    This also has a bonus heuristic for ANU courses: if a page look like it's
+    linked from an ANU course homepage, then we assign it to that ANU
+    course. If it's linked from multiple homepages, then we break ties
+    lexically."""
+
+    # don't process things that are already in a directory
+    if '/' in title:
+        return title
+
+    # find shortest backlink name (and any ANU courses this is linked from)
+    backlinks = list(wiki.index.page_backlinks(title))
+    shortest = None
+    course_name = None
+    for backlink in backlinks:
+        if shortest is None or (len(backlink), backlink) \
+           < (len(shortest), shortest):
+            shortest = backlink
+        if re.match('^' + ANU_COURSE_RE + '$', backlink):
+            if course_name is None or course_name >= backlink:
+                course_name = backlink
+
+    # skip things that have no backlinks, or are only linked from Home
+    if shortest is None or shortest == 'Home':
+        return title
+
+    # special case for ANU courses
+    if course_name is not None:
+        return course_name + '/' + title
+
+    # skip things that are linked from pages that don't look like subpages of
+    # the putative root
+    for backlink in backlinks:
+        if not backlink.startswith(shortest):
+            return title
+
+    return shortest + '/' + title
+
+
+def rewrite_courses(wiki, title):
+    if re.match('^' + ANU_COURSE_RE, title):
+        return 'Courses/ANU/' + title
+
+    if re.match('^(CS|STAT|EE)\d{3}(-\d+)?[a-zA-Z]?', title):
+        return 'Courses/Berkeley/' + title
+
+    return title
+
+
+def rewrite_extra(wiki, title):
+    if title.startswith('GRE'):
+        return 'GRE/' + title
+    if 'PhD' in title:
+        return 'PhD/' + title
+    if title.startswith('WainwrightJordan'):
+        return 'ReadingList/' + title
+    is_conf = any(title.startswith(c) for c in [
+        'ICLR',
+        'AAAI',
+        'IJCAI',
+        'ICAPS',
+        'CHAIWorkshop',
+        'CognitiveRobotics',
+        'DICTA'
+    ])
+    if is_conf:
+        return 'Conferences/' + title
+    return title
+
+
+def add_slash(wiki, title):
+    # putting everything in some directory is useful for VNote
+    if '/' not in title:
+        return 'Root/' + title
+    return title
+
+
+VNOTE_REWRITES = [
+    rewrite_via_backlinks,
+    rewrite_basic_prefixes,
+    rewrite_courses,
+    rewrite_extra,
+    add_slash,
+]
 
 
 def name_to_file(name):
@@ -49,11 +171,11 @@ def mkdir_p(dir_path):
 
 
 class CustomRenderComponents:
-    def __init__(self, converter, page_name, strip_html_link_ext):
+    def __init__(self, converter, page_name, add_link_ext):
         self.converter = converter
         self.wiki = converter.wiki
         self.page_name = page_name
-        self.strip_html_link_ext = strip_html_link_ext
+        self.add_link_ext = add_link_ext
 
         # for _link_alias
         if self.wiki.alias_page and self.wiki.alias_page in self.wiki.storage:
@@ -64,11 +186,9 @@ class CustomRenderComponents:
 
     def get_ref_path(self, other_title):
         # now need to get file paths & relative path between those two
-        this_subpath = self.converter.out_subpath(
-            self.page_name, omit_html_ext=self.strip_html_link_ext)
+        this_subpath = self.converter.out_subpath(self.page_name)
         this_dir = os.path.dirname(this_subpath)
-        other_subpath = self.converter.out_subpath(
-            other_title, omit_html_ext=self.strip_html_link_ext)
+        other_subpath = self.converter.out_subpath(other_title)
         relpath = os.path.relpath(other_subpath, start=this_dir)
         return relpath
 
@@ -148,6 +268,9 @@ class CustomRenderComponents:
                 href = werkzeug.escape(self.get_ref_path(addr) + chunk, True)
                 if addr not in self.wiki.storage:
                     classes.append('nonexistent')
+                # if necessary, add suffix
+                if self.add_link_ext is not None:
+                    href += self.add_link_ext
         class_ = werkzeug.escape(' '.join(classes) or '', True)
         # We need to output HTML on our own to prevent escaping of href
         return u'<a href="%s" class="%s" title="%s">%s</a>' % (
@@ -178,25 +301,48 @@ def scrub_html(html_string):
 
 
 class WikiConverter:
-    def __init__(self, wiki, file_prefix=None, strip_html_link_ext=False):
+    def __init__(self,
+                 wiki,
+                 file_prefix=None,
+                 files_in_one_dir=False,
+                 add_link_ext=None):
         self.wiki = wiki
         self.file_prefix = file_prefix
-        self.strip_html_link_ext = strip_html_link_ext
+        self.files_in_one_dir = files_in_one_dir
+        self.add_link_ext = add_link_ext
 
     def is_raw(self, title):
         return page_mime(title) != 'text/x-wiki'
 
-    def out_subpath(self, title, omit_html_ext=False):
+    def out_subpath(self, title):
+        # sequentially apply any necessary rewrites
+        # XXX: this is a hack. The rewrites are highly specific to my wiki page
+        # structure from Hatta.
+        new_title = title
+        for rewrite_rule in VNOTE_REWRITES:
+            new_title = rewrite_rule(self.wiki, new_title)
+        title = new_title
+
+        # if necessary, remove slashes so that files don't go into different
+        # subdirs
+        is_raw = self.is_raw(title)
+        if is_raw and self.files_in_one_dir:
+            title = title.replace('/', '_')
+
+        # if necessary, add a prefix to file path
         subpath = name_to_file(title)
-        if self.file_prefix is not None and self.is_raw(title):
+        if self.file_prefix is not None and is_raw:
             subpath = os.path.join(self.file_prefix, subpath)
-        if not self.is_raw(title) and not omit_html_ext:
-            subpath += '.html'
+
+        # if not is_raw:
+        #     # XXX: this doesn't actually work
+        #     subpath += '.html'
+
         return subpath
 
     def render(self, title):
         lines = self.wiki.storage.page_text(title).splitlines(True)
-        comp = CustomRenderComponents(self, title, self.strip_html_link_ext)
+        comp = CustomRenderComponents(self, title, self.add_link_ext)
         # WikiWikiParser (which autolinks WikiWords) is unsupported for now,
         # but should be easy to add if ever needed
         parser = hatta.WikiParser(
@@ -230,9 +376,13 @@ def convert_page(page_name,
                  wiki,
                  out_dir,
                  file_prefix=None,
-                 strip_html_link_ext=False):
+                 files_in_one_dir=False,
+                 add_link_ext=None):
     converter = WikiConverter(
-        wiki, file_prefix=file_prefix, strip_html_link_ext=strip_html_link_ext)
+        wiki,
+        file_prefix=file_prefix,
+        files_in_one_dir=files_in_one_dir,
+        add_link_ext=add_link_ext)
 
     # find & construct destination dir
     out_subpath = converter.out_subpath(page_name)
@@ -248,7 +398,7 @@ def convert_page(page_name,
     else:
         # render pages & copy in rendered output
         page_html = converter.render(page_name)
-        with open(out_path, 'wb') as out_fp:
+        with open(out_path + '.html', 'wb') as out_fp:
             out_fp.write(page_html.encode('utf8'))
         coarse_type = 'page'
 
@@ -273,12 +423,12 @@ def main(args):
             wiki=wiki,
             out_dir=args.output_dir,
             file_prefix=args.file_prefix,
-            strip_html_link_ext=args.strip_html_link_ext)
+            files_in_one_dir=args.files_in_one_dir,
+            add_link_ext=args.add_link_ext)
     print('Done!')
 
 
 def _rewrap(text, **kwargs):
-    unwrapped = ' '.join(text.splitlines())
     wrapped_lines = textwrap.wrap(text, **kwargs)
     wrapped = '\n'.join(wrapped_lines)
     return wrapped
@@ -295,7 +445,13 @@ parser.add_argument(
     help="move files (anything that\'s not a wiki page) into this "
     "subdirectory of output_dir")
 parser.add_argument(
-    '--strip-html-link-ext', action='store_true', default='false')
+    '--files-in-one-dir',
+    default=False,
+    action='store_true',
+    help="put all files in one directory with no subdirectories")
+parser.add_argument(
+    '--add-link-ext', default=None,
+    help='add extension for internal pages (e.g. .md)')
 
 if __name__ == '__main__':
     main(parser.parse_args())
